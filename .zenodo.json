@@ -1,0 +1,20 @@
+{
+  "title": "farmsim: Simulating Physical Verification Capacity for AI-Native Device Software",
+  "upload_type": "software",
+  "description": "A small discrete-time simulation of a device farm under rising AI-agent change volume. It compares lab-time allocation policies, farm restocking and canary gating using two measures: the verification capacity ratio and fleet-weighted evidence coverage. Includes code, raw results and figures for the article 'Cheap Code, Scarce Hardware: Verifying AI-Native Device Software'.",
+  "creators": [
+    {
+      "name": "Nair, Naveen",
+      "affiliation": "Independent Researcher"
+    }
+  ],
+  "license": "MIT",
+  "keywords": [
+    "AI-native software engineering",
+    "device software",
+    "hardware-in-the-loop testing",
+    "verification capacity",
+    "simulation"
+  ],
+  "version": "1.0.0"
+}

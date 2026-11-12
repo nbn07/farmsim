@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "farmsim: Simulating Physical Verification Capacity for AI-Native Device Software"
+version: 1.0.0
+date-released: 2026-11-12
+license: MIT
+repository-code: "https://github.com/nbn07/farmsim"
+authors:
+  - family-names: Nair
+    given-names: Naveen
+    affiliation: Independent Researcher
+keywords:
+  - AI-native software engineering
+  - device software
+  - hardware-in-the-loop testing
+  - verification capacity
+  - simulation
