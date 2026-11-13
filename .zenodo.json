@@ -4,7 +4,7 @@
   "description": "A small discrete-time simulation of a device farm under rising AI-agent change volume. It compares lab-time allocation policies, farm restocking and canary gating using two measures: the verification capacity ratio and fleet-weighted evidence coverage. Includes code, raw results and figures for the article 'Cheap Code, Scarce Hardware: Verifying AI-Native Device Software'.",
   "creators": [
     {
-      "name": "Nair, Naveen",
+      "name": "Nair, Naveen Babu Narayanan",
       "affiliation": "Independent Researcher"
     }
   ],
