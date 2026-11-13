@@ -53,13 +53,13 @@ Reported metrics:
 | Canary waves per week | 5 | One per working day; varied 1 to unlimited |
 | Canary fraction | 2% of a class's homes | Varied 1–5% |
 | Canary detection | 0.75 | Below lab detection: field telemetry misses subtle defects; varied 0.5–0.95 |
-| Weeks per run / seeds | 52 / 30 | |
+| Weeks per run / seeds | 52 / 200 for the volume sweep, 30 for sensitivity sweeps | Paired comparisons are precise with 30 seeds; absolute levels at low volume need more |
 
 ## Reproduce
 
 ```
 pip install -r requirements.txt
-python3 experiments.py   # about 9 minutes; writes results/*.csv
+python3 experiments.py   # about 25 minutes; writes results/*.csv
 python3 analyze.py       # writes summary_volume.csv, paired_vs_status_quo.csv, table_6x.csv, sensitivity_6x.csv, figures/
 ```
 
@@ -83,7 +83,7 @@ The suite has 215 tests. They cover:
 
 ## Changelog
 
-- 1.1.0: canary capacity is limited (`canary_waves`) and canary detection defaults to 0.75; a canary catch pulls the change from all untested classes; common random numbers make runs with the same seed paired; new metrics `reached_fleet_rate` and `mean_fwec_after_canary`; `analyze.py` writes paired comparisons with 95% CIs; the restocked farm is in every sensitivity sweep; new sweeps for canary detection, waves and size, and for a capped oldest class (`max_oldest`). These changes followed an independent review. With limited canary capacity, canary gating's benefit shrinks from the large reduction reported under 1.0.0 to a few percent at 5 waves per week.
+- 1.1.0: the volume sweep uses 200 seeds (30 left the 1× baseline noisy); canary capacity is limited (`canary_waves`) and canary detection defaults to 0.75; a canary catch pulls the change from all untested classes; common random numbers make runs with the same seed paired; new metrics `reached_fleet_rate` and `mean_fwec_after_canary`; `analyze.py` writes paired comparisons with 95% CIs; the restocked farm is in every sensitivity sweep; new sweeps for canary detection, waves and size, and for a capped oldest class (`max_oldest`). These changes followed an independent review. With limited canary capacity, canary gating's benefit shrinks from the large reduction reported under 1.0.0 to a few percent at 5 waves per week.
 - 1.0.0: first public release. Fair-share policies are work-conserving, so no device time is left idle while a change could still use it. An earlier internal draft left up to 20% of capacity unused at some volumes; the test suite caught this before release.
 
 ## Citation and license

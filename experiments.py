@@ -5,19 +5,20 @@ import pandas as pd
 
 from farmsim import Config, POLICIES, simulate, fleet_shares, farm_devices_per_class, run_capacity
 
-SEEDS = range(30)
+SEEDS = range(30)          # sensitivity sweeps (paired comparisons are precise)
+VOLUME_SEEDS = range(200)  # main sweep: absolute levels need more seeds
 MULTS = [1, 2, 3, 4, 5, 6, 8, 10]
 OUT = Path("results")
 OUT.mkdir(exist_ok=True)
 
 
-def sweep(name, configs, policies=POLICIES):
+def sweep(name, configs, policies=POLICIES, seeds=SEEDS):
     """Run every config x policy x seed. Seeds share random draws across policies
     (common random numbers), so rows with the same config and seed are paired."""
     rows = []
     for cfg in configs:
         for p in policies:
-            for s in SEEDS:
+            for s in seeds:
                 rows.append(simulate(cfg, p, s))
     df = pd.DataFrame(rows)
     df.to_csv(OUT / f"{name}.csv", index=False)
@@ -42,7 +43,7 @@ def main():
     setup.to_csv(OUT / "setup.csv", index=False)
 
     # RQ1/RQ2: agent volume sweep, both farm stockings, all policies
-    sweep("volume", both_farms([replace(base, multiplier=m) for m in MULTS]))
+    sweep("volume", both_farms([replace(base, multiplier=m) for m in MULTS]), seeds=VOLUME_SEEDS)
 
     # RQ3: one-factor sensitivity at 6x, both farm stockings, all policies
     six = replace(base, multiplier=6)
