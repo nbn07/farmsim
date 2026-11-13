@@ -164,6 +164,20 @@ POLICIES = {
 
 # ---------------------------------------------------------------- simulation
 
+def choose_canary(untested_share: np.ndarray, waves: int) -> np.ndarray:
+    """Pick up to `waves` changes for canary waves: those with the most untested
+    fleet share first (ties: earlier arrival first); changes fully tested in the
+    lab (untested share 0) need no wave."""
+    n = len(untested_share)
+    in_canary = np.zeros(n, bool)
+    if waves <= 0 or n == 0:
+        return in_canary
+    order = np.argsort(-untested_share, kind="stable")
+    chosen = [i for i in order if untested_share[i] > 0][:waves]
+    in_canary[chosen] = True
+    return in_canary
+
+
 def _draw_week(rng_env, cfg, q):
     """Everything random about one week, drawn from a stream that does not depend on
     the policy. Every policy therefore faces the same changes, the same defects and
@@ -179,6 +193,21 @@ def _draw_week(rng_env, cfg, q):
     u_lab = rng_env.random((n, k))                # detection luck for a run on (change, class)
     u_canary = rng_env.random(n)                  # detection luck for the change's canary wave
     return n, defective, affected, u_lab, u_canary
+
+
+def defect_exposure(share, affected, tested, in_canary, canary_lucky, canary_frac):
+    """Exposure of one defect the lab missed, and whether it reached any class in full.
+
+    Classes the change was tested on get the full rollout at once, so a defect there
+    always reaches the fleet. A canary wave sees the defect only through untested
+    affected classes; if it catches it (canary_lucky), the change is pulled from all
+    untested classes and only canary homes (canary_frac of each) were exposed there."""
+    hit_tested = affected & tested
+    hit_untested = affected & ~tested
+    exp_i = float((share * hit_tested).sum())
+    if in_canary and hit_untested.any() and canary_lucky:
+        return exp_i + canary_frac * float((share * hit_untested).sum()), bool(hit_tested.any())
+    return exp_i + float((share * hit_untested).sum()), True
 
 
 def simulate(cfg: Config, policy: str, seed: int) -> dict:
@@ -218,25 +247,14 @@ def simulate(cfg: Config, policy: str, seed: int) -> dict:
         untested_share = ((~tested) * share).sum(axis=1)
         fwec_lab += (tested * share).sum()
 
-        in_canary = np.zeros(n, bool)
-        if canary and cfg.canary_waves > 0:
-            order = np.argsort(-untested_share, kind="stable")
-            chosen = [i for i in order if untested_share[i] > 0][: cfg.canary_waves]
-            in_canary[chosen] = True
+        in_canary = choose_canary(untested_share, cfg.canary_waves) if canary else np.zeros(n, bool)
         fwec_after += (tested * share).sum() + untested_share[in_canary].sum()
 
         lab_catch = (tested & affected & (u_lab < cfg.p_detect)).any(axis=1)
         for i in np.flatnonzero(defective & ~lab_catch):
             missed_by_lab += 1
-            hit_tested = affected[i] & tested[i]
-            hit_untested = affected[i] & ~tested[i]
-            exp_i = (share * hit_tested).sum()
-            if in_canary[i] and hit_untested.any() and u_canary[i] < cfg.p_canary_detect:
-                exp_i += cfg.canary_frac * (share * hit_untested).sum()
-                reached = hit_tested.any()
-            else:
-                exp_i += (share * hit_untested).sum()
-                reached = True
+            exp_i, reached = defect_exposure(share, affected[i], tested[i], in_canary[i],
+                                             u_canary[i] < cfg.p_canary_detect, cfg.canary_frac)
             exposure += exp_i
             reached_fleet += int(reached)
 

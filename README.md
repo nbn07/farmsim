@@ -70,14 +70,15 @@ pip install pytest
 python3 -m pytest -q
 ```
 
-The suite has 206 tests. They cover:
+The suite has 215 tests. They cover:
 
 - **Setup invariants:** shares sum to 1, the farm holds exactly the configured number of devices, capacity follows its formula.
 - **Policy invariants:** no class is over-booked, no capacity sits idle while a change could use it, and fair-share policies spread runs evenly.
 - **Exact analytic checks:** escape rate with full testing, exposure per defect with no lab, and exposure with canary gating only.
 - **Boundary cases:** no defects, perfect or zero detection.
 - **Determinism and pairing:** the same seed gives the same result, and every policy sees the same changes and defects.
-- **Canary limits:** zero waves equals no gating, coverage gained never exceeds one change per wave, more waves never hurt.
+- **Canary limits:** zero waves equals no gating, coverage gained never exceeds one change per wave, more waves never hurt, wave selection order, the exposure rule for each defect, and exact expected exposure with limited waves.
+- **Mutation testing:** 15 of 16 deliberately planted bugs are caught; the remaining one changes data on non-defective changes that is never read, so no test can observe it.
 - **Randomized stress test:** 200 random configurations with range checks on every output.
 
 ## Changelog

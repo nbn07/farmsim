@@ -387,3 +387,96 @@ def test_max_oldest_caps_and_conserves_devices(cap):
 
 def test_max_oldest_ignored_in_recency_mode():
     assert np.array_equal(fs.farm_devices_per_class(Config(max_oldest=2)), fs.farm_devices_per_class(Config()))
+
+
+# ------------------------------------------------------------------ 1.1.0: deeper checks of the canary model
+
+def test_choose_canary_orders_by_untested_share_then_arrival():
+    u = np.array([0.2, 0.0, 0.7, 0.7, 0.1, 0.5])
+    assert list(np.flatnonzero(fs.choose_canary(u, 3))) == [2, 3, 5]
+    assert list(np.flatnonzero(fs.choose_canary(u, 10))) == [0, 2, 3, 4, 5]  # never the fully tested change
+    assert not fs.choose_canary(u, 0).any()
+    assert not fs.choose_canary(np.zeros(0), 5).any()
+
+
+def _poisson_expected_min(lam, w):
+    """E[min(N, w)] for N ~ Poisson(lam), exactly by summing the distribution."""
+    from math import exp, lgamma, log
+    total, j = 0.0, 0
+    while j < lam * 10 + 100:
+        p = exp(-lam + j * log(lam) - lgamma(j + 1))
+        total += p * min(j, w)
+        j += 1
+    return total
+
+
+@pytest.mark.parametrize("waves", [1, 5, 15])
+def test_limited_canary_exact_value_without_lab(waves):
+    """No lab capacity: every change is fully untested (untested share 1), so the first
+    `waves` arrivals of each week get a canary wave. Expected exposure per week is
+    p_defect * E[S] * (factor * E[min(N, w)] + (lambda - E[min(N, w)])),
+    with factor = p_canary * canary_frac + (1 - p_canary) and E[S] the exposure of one defect."""
+    cfg = Config(hours_per_device=0.0, weeks=3000, multiplier=1, canary_waves=waves)
+    lam = cfg.base_rate * cfg.multiplier
+    r = fs.simulate(cfg, "availability_canary", seed=11)
+    factor = cfg.p_canary_detect * cfg.canary_frac + (1 - cfg.p_canary_detect)
+    m = _poisson_expected_min(lam, waves)
+    expected = cfg.p_defect * _expected_exposure_per_defect(cfg) * (factor * m + (lam - m))
+    assert r["exposure_per_week"] == pytest.approx(expected, rel=0.03)
+
+
+def test_canary_reached_fleet_rate_exact_without_lab():
+    """No lab, unlimited canary: a defect reaches the fleet only if its canary wave misses it."""
+    cfg = Config(hours_per_device=0.0, weeks=2000, canary_waves=10**6)
+    r = fs.simulate(cfg, "availability_canary", seed=12)
+    assert r["reached_fleet_rate"] == pytest.approx(1 - cfg.p_canary_detect, abs=0.01)
+    assert r["mean_fwec"] == 0.0 and r["mean_fwec_after_canary"] == pytest.approx(1.0)
+
+
+def test_lab_policy_does_not_change_random_draws():
+    """Common random numbers: with ample capacity every policy tests everything, so all
+    outcomes must be identical, not just statistically similar."""
+    cfg = Config(hours_per_device=10_000.0, weeks=40, multiplier=3)
+    outs = [fs.simulate(cfg, p, seed=21) for p in ["fifo", "availability", "fleet_weighted"]]
+    keys = ["escape_rate", "exposure_per_week", "mean_fwec", "reached_fleet_rate"]
+    assert all(o[k] == outs[0][k] for o in outs for k in keys)
+
+
+def test_farm_mode_does_not_change_random_draws():
+    a = fs.simulate(Config(multiplier=6, weeks=20), "availability", seed=5)
+    b = fs.simulate(Config(multiplier=6, weeks=20, farm_mode="fleet"), "availability", seed=5)
+    assert a["changes"] == b["changes"] and a["defective"] == b["defective"]
+
+
+# ------------------------------------------------------------------ analysis helpers
+
+def test_exp100_and_paired_vs():
+    import pandas as pd
+    import analyze
+    df = pd.DataFrame({
+        "seed": [0, 1, 0, 1], "config": ["recency/availability"] * 2 + ["x/y"] * 2,
+        "k": [6, 6, 6, 6], "exposure_per_week": [2.0, 4.0, 1.0, 2.0],
+        "changes": [100, 200, 100, 200], "cfg_weeks": [1, 1, 1, 1]})
+    df["exp100"] = analyze.exp100(df)
+    assert list(df["exp100"]) == [2.0, 2.0, 1.0, 1.0]
+    p = analyze.paired_vs(df, ["k"]).set_index("config")
+    assert p.loc["recency/availability", "rel_change"] == 0.0
+    assert p.loc["x/y", "rel_change"] == pytest.approx(-0.5)
+    assert p.loc["x/y", "ci_low"] == pytest.approx(-0.5)  # identical paired differences: zero width
+
+
+def test_defect_exposure_rules():
+    share = np.array([0.5, 0.3, 0.2])
+    aff = np.array([True, True, False])
+    tested = np.array([True, False, False])
+    # caught in canary: tested class full (0.5), untested affected class at canary fraction
+    assert fs.defect_exposure(share, aff, tested, True, True, 0.1) == (pytest.approx(0.5 + 0.03), True)
+    # canary missed it: full exposure everywhere
+    assert fs.defect_exposure(share, aff, tested, True, False, 0.1) == (pytest.approx(0.8), True)
+    # not in a canary wave: full exposure
+    assert fs.defect_exposure(share, aff, tested, False, True, 0.1) == (pytest.approx(0.8), True)
+    # only untested classes affected and caught in canary: never reached the fleet
+    e, reached = fs.defect_exposure(share, np.array([False, True, True]), tested, True, True, 0.1)
+    assert e == pytest.approx(0.05) and reached is False
+    # only tested classes affected: a canary wave cannot see it
+    assert fs.defect_exposure(share, np.array([True, False, False]), tested, True, True, 0.1) == (pytest.approx(0.5), True)
