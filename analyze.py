@@ -1,4 +1,4 @@
-"""Summaries and figures from results/*.csv. Usage: python3 analyze.py"""
+"""Summaries, paired comparisons and figures from results/*.csv. Usage: python3 analyze.py"""
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -10,86 +10,110 @@ R = Path("results")
 F = Path("figures")
 F.mkdir(exist_ok=True)
 
+STATUS_QUO = "recency/availability"
+CONFIGS = {  # label used in tables -> (farm_mode, policy)
+    "recency/availability": "Status quo: test where devices are free",
+    "recency/fifo": "First come, first served",
+    "recency/fleet_weighted": "Fleet-weighted allocation",
+    "fleet/availability": "Farm restocked to match the fleet",
+    "recency/availability_canary": "Canary gating (5 waves/week)",
+    "fleet/availability_canary": "Restocked farm + canary gating",
+}
 
-def per100(df):
-    """Exposure per 100 changes: expected defect-bearing updates an average device receives
-    for every 100 changes released (fleet shares sum to 1, so a sum of shares is a per-device count)."""
+
+def exp100(df):
+    """Exposure per 100 changes: defect-bearing updates an average device receives for
+    every 100 changes released (fleet shares sum to 1, so a sum of shares counts
+    updates per device)."""
+    return df["exposure_per_week"] / (df["changes"] / df["cfg_weeks"]) * 100
+
+
+def prep(df):
     df = df.copy()
-    df["exp100"] = df["exposure_per_week"] / (df["changes"] / df["cfg_weeks"]) * 100
+    df["exp100"] = exp100(df)
+    df["config"] = df["cfg_farm_mode"] + "/" + df["policy"]
     return df
 
 
 def ci(x):
-    return 1.96 * x.std(ddof=1) / np.sqrt(len(x))
+    x = np.asarray(x, float)
+    return 1.96 * x.std(ddof=1) / np.sqrt(len(x)) if len(x) > 1 else 0.0
+
+
+def paired_vs(df, keys, ref=STATUS_QUO, metric="exp100"):
+    """Paired relative change vs the reference config, per seed (common random numbers).
+    Returns mean relative change and its 95% CI for every config."""
+    rows = []
+    for k, g in df.groupby(keys):
+        piv = g.pivot_table(index="seed", columns="config", values=metric)
+        base = piv[ref]
+        for c in piv.columns:
+            rel = (piv[c] - base) / base.mean()
+            rows.append({**dict(zip(keys, k if isinstance(k, tuple) else (k,))),
+                         "config": c, "rel_change": rel.mean(),
+                         "ci_low": rel.mean() - ci(rel), "ci_high": rel.mean() + ci(rel)})
+    return pd.DataFrame(rows)
 
 
 def main():
-    vol = per100(pd.read_csv(R / "rq1_rq2_volume.csv"))
-    rest = per100(pd.read_csv(R / "rq2_restocked.csv"))
-    rest["policy"] = "restocked_" + rest["policy"]
-    both = pd.concat([vol, rest])
-
-    s = both.groupby(["cfg_multiplier", "policy"]).agg(
-        escape_rate=("escape_rate", "mean"), escape_ci=("escape_rate", ci),
+    vol = prep(pd.read_csv(R / "volume.csv"))
+    s = vol.groupby(["cfg_multiplier", "config"]).agg(
+        missed_by_lab=("escape_rate", "mean"), reached_fleet=("reached_fleet_rate", "mean"),
         exp100=("exp100", "mean"), exp100_ci=("exp100", ci),
-        fwec=("mean_fwec", "mean"), vcr_oldest=("vcr_oldest", "mean"),
-        vcr_newest=("vcr_newest", "mean")).reset_index()
+        fwec=("mean_fwec", "mean"), fwec_after_canary=("mean_fwec_after_canary", "mean"),
+        vcr_oldest=("vcr_oldest", "mean"), vcr_newest=("vcr_newest", "mean")).reset_index()
     s.to_csv(R / "summary_volume.csv", index=False)
 
-    # Table: interventions at 6x
-    t = s[s.cfg_multiplier == 6].set_index("policy")
-    ref = t.loc["availability", "exp100"]
-    t["exposure_vs_status_quo"] = t["exp100"] / ref - 1
-    keep = ["availability", "fifo", "fleet_weighted", "fleet_weighted_canary",
-            "restocked_availability", "restocked_fleet_weighted_canary"]
-    t = t.loc[keep, ["escape_rate", "escape_ci", "fwec", "exp100", "exp100_ci", "exposure_vs_status_quo"]]
-    t.to_csv(R / "table_6x.csv")
-    print(t.round(3).to_string())
+    paired = paired_vs(vol, ["cfg_multiplier"])
+    paired.to_csv(R / "paired_vs_status_quo.csv", index=False)
 
-    # sensitivity table at 6x
-    rows = []
-    for name, f, col in [("skew", "rq3_skew.csv", "cfg_fleet_skew"),
-                         ("flat_q", "rq3_flat_q.csv", "cfg_q_oldest"),
-                         ("detect", "rq3_detect.csv", "cfg_p_detect")]:
-        d = per100(pd.read_csv(R / f))
-        g = d.groupby([col, "policy"])["exp100"].mean().unstack()
-        for v, r in g.iterrows():
-            rows.append({"factor": name, "value": v,
-                         "fleet_vs_avail": r["fleet_weighted"] / r["availability"] - 1,
-                         "canary_vs_avail": r["fleet_weighted_canary"] / r["availability"] - 1})
-    sens = pd.DataFrame(rows)
+    t = s[s.cfg_multiplier == 6].set_index("config").loc[list(CONFIGS)]
+    p6 = paired[paired.cfg_multiplier == 6].set_index("config").loc[list(CONFIGS)]
+    t = t.join(p6[["rel_change", "ci_low", "ci_high"]])
+    t.insert(0, "label", [CONFIGS[c] for c in t.index])
+    t.to_csv(R / "table_6x.csv")
+    print(t[["label", "missed_by_lab", "reached_fleet", "fwec", "fwec_after_canary", "exp100", "exp100_ci",
+             "rel_change", "ci_low", "ci_high"]].round(3).to_string())
+
+    # sensitivity: paired relative change vs status quo for each factor value
+    sens = []
+    for name, col in [("skew", "cfg_fleet_skew"), ("flat_q", "cfg_q_oldest"), ("lab_detect", "cfg_p_detect"),
+                      ("canary_detect", "cfg_p_canary_detect"), ("canary_waves", "cfg_canary_waves"),
+                      ("canary_frac", "cfg_canary_frac"), ("restock_cap", "cfg_max_oldest")]:
+        d = prep(pd.read_csv(R / f"sens_{name}.csv"))
+        pv = paired_vs(d, [col])
+        pv.insert(0, "factor", name)
+        pv = pv.rename(columns={col: "value"})
+        sens.append(pv)
+    sens = pd.concat(sens)
     sens.to_csv(R / "sensitivity_6x.csv", index=False)
-    print(sens.round(3).to_string())
+    wide = sens.pivot_table(index=["factor", "value"], columns="config", values="rel_change")
+    print(wide[[c for c in CONFIGS if c != STATUS_QUO]].round(3).to_string())
 
     # Figure 2: exposure per 100 changes vs agent multiplier
-    labels = {
-        "fifo": "First come, first served",
-        "availability": "Test where devices are free (status quo)",
-        "fleet_weighted": "Fleet-weighted allocation",
-        "restocked_availability": "Farm restocked to match fleet",
-        "fleet_weighted_canary": "Fleet-weighted + canary gating",
-    }
     styles = {
-        "fifo": dict(color="#888780", ls=":"),
-        "availability": dict(color="#444441", ls="-"),
-        "fleet_weighted": dict(color="#378ADD", ls="--"),
-        "restocked_availability": dict(color="#BA7517", ls="-."),
-        "fleet_weighted_canary": dict(color="#185FA5", ls="-", lw=2.2),
+        "recency/fifo": dict(color="#888780", ls=":"),
+        "recency/availability": dict(color="#444441", ls="-"),
+        "recency/fleet_weighted": dict(color="#378ADD", ls="--"),
+        "fleet/availability": dict(color="#BA7517", ls="-."),
+        "recency/availability_canary": dict(color="#185FA5", ls="-", lw=2.0),
+        "fleet/availability_canary": dict(color="#0F6E56", ls="-", lw=2.0, marker="s"),
     }
     fig, ax = plt.subplots(figsize=(6.4, 4.0), dpi=200)
-    for p, lab in labels.items():
-        d = s[s.policy == p]
-        ax.errorbar(d.cfg_multiplier, d.exp100, yerr=d.exp100_ci, label=lab,
-                    marker="o", ms=3.5, capsize=2, **styles[p])
+    for c, lab in CONFIGS.items():
+        d = s[s.config == c]
+        st = dict(marker="o", ms=3.5)
+        st.update(styles[c])
+        ax.errorbar(d.cfg_multiplier, d.exp100, yerr=d.exp100_ci, label=lab, capsize=2, **st)
     ax.set_xlabel("Change volume relative to human-only baseline (×)")
-    ax.set_ylabel("Defect-bearing updates per device\nper 100 changes released")
+    ax.set_ylabel("Defect-bearing updates per home\nper 100 changes released")
     ax.set_xticks([1, 2, 3, 4, 5, 6, 8, 10])
     ax.grid(alpha=0.3)
     ax.spines[["top", "right"]].set_visible(False)
-    ax.legend(frameon=False, fontsize=8, loc="upper left")
+    ax.legend(frameon=False, fontsize=7.5, loc="upper left")
     fig.tight_layout()
     fig.savefig(F / "fig2_exposure.png")
-    fig.savefig(F / "fig2_exposure.pdf")
+    fig.savefig(F / "fig2_exposure.pdf", metadata={"CreationDate": None, "ModDate": None})
     print("figures written")
 
 

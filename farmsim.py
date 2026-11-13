@@ -11,13 +11,16 @@ Each simulated week:
   * A test run on an affected class detects the defect with probability d.
     A detected defect is fixed before release (the change does not escape).
   * Undetected defective changes ship. Their "fleet exposure" is the fleet
-    share of the classes they affect (optionally reduced by canary gating).
+    share of the classes they affect (optionally reduced by canary gating,
+    which has a limited number of canary waves per week).
+  * All randomness comes from one policy-independent stream per seed, so
+    every policy sees the same changes, defects and detection luck.
 
 All parameters are in Config and are documented in README.md.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 import numpy as np
 
 
@@ -35,9 +38,12 @@ class Config:
     q_newest: float = 0.15          # prob. a defect manifests on the newest class
     p_detect: float = 0.90          # prob. one run on an affected class detects the defect
     canary_frac: float = 0.02       # share of a class's homes in the canary group
-    p_canary_detect: float = 0.95   # prob. canary group catches a defect before full rollout
+    p_canary_detect: float = 0.75   # prob. a canary wave catches a defect it can see (below lab detection)
+    canary_waves: int = 5           # canary waves per week (one change per wave); limits canary capacity
     weeks: int = 52
     farm_mode: str = "recency"      # "recency": farm stocks newer boards; "fleet": stocked by fleet share
+    max_oldest: int = 0             # fleet mode only: cap on units of the oldest class (0 = no cap),
+                                    # e.g. because the model is discontinued; the rest is spread by share
 
 
 def fleet_shares(cfg: Config) -> np.ndarray:
@@ -47,25 +53,38 @@ def fleet_shares(cfg: Config) -> np.ndarray:
     return w / w.sum()
 
 
-def farm_devices_per_class(cfg: Config) -> np.ndarray:
-    """Farms tend to stock newer hardware: device count grows with recency.
-    Every class gets at least one device."""
-    if cfg.farm_mode == "fleet":
-        weight = fleet_shares(cfg)
-    else:
-        weight = np.arange(1, cfg.n_classes + 1, dtype=float)  # newest class has the largest weight
-    raw = weight / weight.sum() * cfg.farm_devices
+def _allocate(weight: np.ndarray, total: int) -> np.ndarray:
+    """Split `total` devices in proportion to `weight`, at least one per class,
+    remaining units by largest fractional remainder."""
+    raw = weight / weight.sum() * total
     dev = np.maximum(1, np.floor(raw)).astype(int)
-    # hand out remaining devices by largest fractional remainder
     rem = raw - np.floor(raw)
     for i in np.argsort(-rem, kind="stable"):
-        if dev.sum() >= cfg.farm_devices:
+        if dev.sum() >= total:
             break
         dev[i] += 1
     # if the minimum-of-one rule overshot, take back from the largest pools
-    while dev.sum() > cfg.farm_devices:
+    while dev.sum() > total:
         dev[np.argmax(dev)] -= 1
     return dev
+
+
+def farm_devices_per_class(cfg: Config) -> np.ndarray:
+    """Devices per hardware class.
+
+    recency: farms tend to stock newer hardware, so device count grows with recency.
+    fleet: stocked in proportion to fleet share. With max_oldest > 0 the oldest class
+    is capped (e.g. a discontinued model) and the remaining devices are split over the
+    other classes by fleet share. Every class gets at least one device."""
+    if cfg.farm_mode == "fleet":
+        share = fleet_shares(cfg)
+        if cfg.max_oldest > 0:
+            full = _allocate(share, cfg.farm_devices)
+            oldest = max(1, min(cfg.max_oldest, int(full[0])))
+            rest = _allocate(share[1:], cfg.farm_devices - oldest)
+            return np.concatenate([[oldest], rest]).astype(int)
+        return _allocate(share, cfg.farm_devices)
+    return _allocate(np.arange(1, cfg.n_classes + 1, dtype=float), cfg.farm_devices)
 
 
 def run_capacity(cfg: Config) -> np.ndarray:
@@ -134,65 +153,108 @@ def policy_fleet(n, cap, share, rng):
 
 
 POLICIES = {
+    # name: (lab allocation, canary gating on?)
     "fifo": (policy_fifo, False),
     "availability": (policy_availability, False),
     "fleet_weighted": (policy_fleet, False),
+    "availability_canary": (policy_availability, True),
     "fleet_weighted_canary": (policy_fleet, True),
 }
 
 
 # ---------------------------------------------------------------- simulation
 
+def _draw_week(rng_env, cfg, q):
+    """Everything random about one week, drawn from a stream that does not depend on
+    the policy. Every policy therefore faces the same changes, the same defects and
+    the same detection luck (common random numbers), so comparisons are truly paired."""
+    k = cfg.n_classes
+    n = rng_env.poisson(cfg.base_rate * cfg.multiplier)
+    defective = rng_env.random(n) < cfg.p_defect
+    affected = rng_env.random((n, k)) < q
+    forced = rng_env.integers(k, size=n)
+    none = ~affected.any(axis=1)
+    affected[none, forced[none]] = True          # every defect affects at least one class
+    affected &= defective[:, None]                # non-defective changes affect nothing
+    u_lab = rng_env.random((n, k))                # detection luck for a run on (change, class)
+    u_canary = rng_env.random(n)                  # detection luck for the change's canary wave
+    return n, defective, affected, u_lab, u_canary
+
+
 def simulate(cfg: Config, policy: str, seed: int) -> dict:
-    rng = np.random.default_rng(seed)
+    """Simulate cfg.weeks weeks.
+
+    Lab: a run on an affected class catches the defect with probability p_detect;
+    a lab catch fixes the change everywhere before release.
+
+    Canary gating (policies ending in _canary): after the lab, up to canary_waves
+    changes per week are sent first to a canary group (canary_frac of the homes of
+    each class the change was NOT tested on); changes with the most untested fleet
+    share go first. Classes the change WAS tested on get the full rollout at once.
+    A canary wave sees the defect only if it affects at least one untested class;
+    it then catches it with probability p_canary_detect, and the change is pulled
+    from all untested classes, so only canary homes were exposed there. Changes
+    that get no canary wave go to every untested class in full, as without gating.
+
+    Exposure of a shipped defect = sum of the fleet shares of the affected classes
+    it reached in full (plus canary_frac x share for canary-only exposure). Shares
+    sum to 1, so exposure counts defect-bearing updates per average device.
+    """
+    rng_env = np.random.default_rng([seed, 0])
     share = fleet_shares(cfg)
     cap = run_capacity(cfg)
     q = manifest_probs(cfg)
     fn, canary = POLICIES[policy]
-    k = cfg.n_classes
 
-    lam = cfg.base_rate * cfg.multiplier
-    tot_changes = tot_defective = tot_escaped = 0
-    exposure = 0.0
-    fwec_sum = 0.0
+    tot_changes = tot_defective = missed_by_lab = reached_fleet = 0
+    exposure = fwec_lab = fwec_after = 0.0
     for _ in range(cfg.weeks):
-        n = rng.poisson(lam)
+        n, defective, affected, u_lab, u_canary = _draw_week(rng_env, cfg, q)
         tot_changes += n
+        tot_defective += int(defective.sum())
         if n == 0:
             continue
-        tested = fn(n, cap, share, rng)
-        fwec_sum += (tested * share).sum()
-        defective = rng.random(n) < cfg.p_defect
-        for i in np.flatnonzero(defective):
-            tot_defective += 1
-            affected = rng.random(k) < q
-            if not affected.any():
-                affected[rng.integers(k)] = True
-            runs_on_affected = tested[i] & affected
-            caught = (rng.random(runs_on_affected.sum()) < cfg.p_detect).any()
-            if caught:
-                continue
-            tot_escaped += 1
-            for c in np.flatnonzero(affected):
-                if canary and not tested[i, c]:
-                    # untested classes are held to the canary group first
-                    if rng.random() < cfg.p_canary_detect:
-                        exposure += cfg.canary_frac * share[c]
-                        continue
-                exposure += share[c]
-    demand_runs = lam * k  # every change would ideally run on every class
+        tested = fn(n, cap, share, None)
+        untested_share = ((~tested) * share).sum(axis=1)
+        fwec_lab += (tested * share).sum()
+
+        in_canary = np.zeros(n, bool)
+        if canary and cfg.canary_waves > 0:
+            order = np.argsort(-untested_share, kind="stable")
+            chosen = [i for i in order if untested_share[i] > 0][: cfg.canary_waves]
+            in_canary[chosen] = True
+        fwec_after += (tested * share).sum() + untested_share[in_canary].sum()
+
+        lab_catch = (tested & affected & (u_lab < cfg.p_detect)).any(axis=1)
+        for i in np.flatnonzero(defective & ~lab_catch):
+            missed_by_lab += 1
+            hit_tested = affected[i] & tested[i]
+            hit_untested = affected[i] & ~tested[i]
+            exp_i = (share * hit_tested).sum()
+            if in_canary[i] and hit_untested.any() and u_canary[i] < cfg.p_canary_detect:
+                exp_i += cfg.canary_frac * (share * hit_untested).sum()
+                reached = hit_tested.any()
+            else:
+                exp_i += (share * hit_untested).sum()
+                reached = True
+            exposure += exp_i
+            reached_fleet += int(reached)
+
+    lam = cfg.base_rate * cfg.multiplier
     with np.errstate(divide="ignore"):
-        vcr = demand_runs / k / cap  # per-class: changes/week vs runs/week (inf if no capacity)
+        vcr = lam / cap  # per class: changes/week needing evidence vs runs/week (inf if no capacity)
     return {
         "policy": policy,
         "seed": seed,
         **{f"cfg_{k_}": v for k_, v in asdict(cfg).items()},
         "changes": tot_changes,
         "defective": tot_defective,
-        "escaped": tot_escaped,
-        "escape_rate": tot_escaped / max(tot_defective, 1),
+        "escaped": missed_by_lab,                       # kept for compatibility: missed by the lab
+        "escape_rate": missed_by_lab / max(tot_defective, 1),
+        "reached_fleet_rate": reached_fleet / max(tot_defective, 1),
         "exposure_per_week": exposure / cfg.weeks,
-        "mean_fwec": fwec_sum / max(tot_changes, 1),
+        "mean_fwec": fwec_lab / max(tot_changes, 1),
+        "mean_fwec_after_canary": fwec_after / max(tot_changes, 1),
         "vcr_max": float(vcr.max()),
         "vcr_oldest": float(vcr[0]),
         "vcr_newest": float(vcr[-1]),

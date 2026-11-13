@@ -12,6 +12,8 @@ OUT.mkdir(exist_ok=True)
 
 
 def sweep(name, configs, policies=POLICIES):
+    """Run every config x policy x seed. Seeds share random draws across policies
+    (common random numbers), so rows with the same config and seed are paired."""
     rows = []
     for cfg in configs:
         for p in policies:
@@ -22,9 +24,13 @@ def sweep(name, configs, policies=POLICIES):
     return df
 
 
+def both_farms(cfgs):
+    """Each config with the status-quo farm and with the farm restocked to the fleet."""
+    return [c for cfg in cfgs for c in (cfg, replace(cfg, farm_mode="fleet"))]
+
+
 def main():
     base = Config()
-    # setup table
     setup = pd.DataFrame({
         "class": range(base.n_classes),
         "fleet_share": fleet_shares(base),
@@ -35,17 +41,19 @@ def main():
     })
     setup.to_csv(OUT / "setup.csv", index=False)
 
-    # RQ1/RQ2: agent volume sweep, status-quo farm
-    sweep("rq1_rq2_volume", [replace(base, multiplier=m) for m in MULTS])
-    # RQ2b: farm restocked by fleet share
-    sweep("rq2_restocked", [replace(base, multiplier=m, farm_mode="fleet") for m in MULTS])
-    # RQ3: sensitivity at 6x
-    sens = []
-    for skew in [0.0, 0.5, 1.0, 1.5]:
-        sens.append(replace(base, multiplier=6, fleet_skew=skew))
-    sweep("rq3_skew", sens)
-    sweep("rq3_flat_q", [replace(base, multiplier=6, q_oldest=0.325, q_newest=0.325)])
-    sweep("rq3_detect", [replace(base, multiplier=6, p_detect=d) for d in [0.6, 0.75, 0.9]])
+    # RQ1/RQ2: agent volume sweep, both farm stockings, all policies
+    sweep("volume", both_farms([replace(base, multiplier=m) for m in MULTS]))
+
+    # RQ3: one-factor sensitivity at 6x, both farm stockings, all policies
+    six = replace(base, multiplier=6)
+    sweep("sens_skew", both_farms([replace(six, fleet_skew=v) for v in [0.0, 0.5, 1.0, 1.5]]))
+    sweep("sens_flat_q", both_farms([replace(six, q_oldest=0.325, q_newest=0.325)]))
+    sweep("sens_lab_detect", both_farms([replace(six, p_detect=v) for v in [0.6, 0.75, 0.9]]))
+    sweep("sens_canary_detect", both_farms([replace(six, p_canary_detect=v) for v in [0.5, 0.75, 0.9, 0.95]]))
+    sweep("sens_canary_waves", both_farms([replace(six, canary_waves=v) for v in [1, 2, 5, 10, 20, 1_000_000]]))
+    sweep("sens_canary_frac", both_farms([replace(six, canary_frac=v) for v in [0.01, 0.02, 0.05]]))
+    # restocking when the oldest model can no longer be bought: cap its units (ignored by the recency farm)
+    sweep("sens_restock_cap", both_farms([replace(six, max_oldest=v) for v in [1, 2, 4, 8]]))
     print("done")
 
 

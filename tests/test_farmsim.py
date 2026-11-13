@@ -184,7 +184,7 @@ def test_no_capacity_means_every_defect_escapes(policy):
     cfg = Config(hours_per_device=0.0, weeks=400, multiplier=2)
     r = fs.simulate(cfg, policy, seed=1)
     assert r["mean_fwec"] == 0.0
-    if policy != "fleet_weighted_canary":
+    if not POLICIES[policy][1]:
         assert r["escape_rate"] == 1.0
         per_defect = r["exposure_per_week"] * cfg.weeks / r["defective"]
         assert per_defect == pytest.approx(_expected_exposure_per_defect(cfg), rel=0.03)
@@ -220,7 +220,7 @@ def test_no_defects_means_no_exposure():
 
 def test_canary_perfect_and_tiny_removes_untested_exposure():
     """With no lab capacity, a perfect canary of zero homes leaves zero exposure."""
-    cfg = Config(hours_per_device=0.0, canary_frac=0.0, p_canary_detect=1.0, weeks=100)
+    cfg = Config(hours_per_device=0.0, canary_frac=0.0, p_canary_detect=1.0, canary_waves=10**6, weeks=100)
     r = fs.simulate(cfg, "fleet_weighted_canary", seed=0)
     assert r["exposure_per_week"] == 0.0
 
@@ -228,7 +228,7 @@ def test_canary_perfect_and_tiny_removes_untested_exposure():
 def test_canary_exact_value_without_lab():
     """No lab: every affected class goes through canary. Exposure per defect =
     E[sum share_k * (pc*f + (1-pc)*1)] over affected k."""
-    cfg = Config(hours_per_device=0.0, weeks=600, multiplier=2)
+    cfg = Config(hours_per_device=0.0, weeks=600, multiplier=2, canary_waves=10**6)
     r = fs.simulate(cfg, "fleet_weighted_canary", seed=5)
     factor = cfg.p_canary_detect * cfg.canary_frac + (1 - cfg.p_canary_detect)
     expected = _expected_exposure_per_defect(cfg) * factor
@@ -320,3 +320,70 @@ def test_random_configs_stay_in_range():
             assert 0.0 <= r["mean_fwec"] <= 1.0 + 1e-9
             # each escaped defect can expose at most the whole fleet once
             assert 0.0 <= r["exposure_per_week"] * cfg.weeks <= r["escaped"] + 1e-9
+
+
+# ------------------------------------------------------------------ 1.1.0: paired draws and limited canary capacity
+
+@pytest.mark.parametrize("m", [1, 4, 8])
+def test_common_random_numbers_across_policies(m):
+    """Every policy sees the same changes and defects for the same seed."""
+    runs = [fs.simulate(Config(multiplier=m, weeks=20), p, seed=4) for p in POLICIES]
+    assert len({r["changes"] for r in runs}) == 1
+    assert len({r["defective"] for r in runs}) == 1
+
+
+@pytest.mark.parametrize("m", [1, 6])
+def test_zero_canary_waves_equals_no_gating(m):
+    for base, gated in [("fleet_weighted", "fleet_weighted_canary"), ("availability", "availability_canary")]:
+        a = fs.simulate(Config(multiplier=m, canary_waves=0), base, seed=9)
+        b = fs.simulate(Config(multiplier=m, canary_waves=0), gated, seed=9)
+        assert a["exposure_per_week"] == pytest.approx(b["exposure_per_week"])
+        assert a["escape_rate"] == b["escape_rate"]
+
+
+@pytest.mark.parametrize("waves", [0, 1, 5, 20])
+def test_canary_waves_limit_coverage_gain(waves):
+    """Canary can add at most one change's untested share per wave per week."""
+    cfg = Config(multiplier=6, canary_waves=waves, weeks=30)
+    r = fs.simulate(cfg, "fleet_weighted_canary", seed=1)
+    gain = (r["mean_fwec_after_canary"] - r["mean_fwec"]) * r["changes"]
+    assert gain <= waves * cfg.weeks + 1e-9
+    assert r["mean_fwec_after_canary"] >= r["mean_fwec"] - 1e-12
+
+
+def test_more_canary_waves_never_hurt_same_seed():
+    prev = None
+    for waves in [0, 1, 5, 20, 10**6]:
+        e = fs.simulate(Config(multiplier=6, canary_waves=waves), "fleet_weighted_canary", seed=2)["exposure_per_week"]
+        if prev is not None:
+            assert e <= prev + 1e-12
+        prev = e
+
+
+def test_reached_fleet_never_exceeds_missed_by_lab():
+    for p in POLICIES:
+        r = fs.simulate(Config(multiplier=6), p, seed=3)
+        assert r["reached_fleet_rate"] <= r["escape_rate"] + 1e-12
+        if not POLICIES[p][1]:
+            assert r["reached_fleet_rate"] == pytest.approx(r["escape_rate"])
+
+
+def test_canary_sees_only_untested_classes():
+    """If the lab tests every class, canary gating changes nothing."""
+    cfg = Config(hours_per_device=10_000.0, weeks=60)
+    a = fs.simulate(cfg, "fleet_weighted", seed=0)
+    b = fs.simulate(cfg, "fleet_weighted_canary", seed=0)
+    assert a["exposure_per_week"] == pytest.approx(b["exposure_per_week"])
+
+
+@pytest.mark.parametrize("cap", [1, 2, 4, 8, 100])
+def test_max_oldest_caps_and_conserves_devices(cap):
+    cfg = Config(farm_mode="fleet", max_oldest=cap)
+    dev = fs.farm_devices_per_class(cfg)
+    assert dev.sum() == cfg.farm_devices
+    assert dev[0] == min(cap, fs.farm_devices_per_class(Config(farm_mode="fleet"))[0])
+    assert dev.min() >= 1
+
+
+def test_max_oldest_ignored_in_recency_mode():
+    assert np.array_equal(fs.farm_devices_per_class(Config(max_oldest=2)), fs.farm_devices_per_class(Config()))

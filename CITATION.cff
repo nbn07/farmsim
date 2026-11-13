@@ -1,8 +1,8 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: "farmsim: Simulating Physical Verification Capacity for AI-Native Device Software"
-version: 1.0.0
-date-released: 2026-11-12
+version: 1.1.0
+date-released: 2026-11-13
 license: MIT
 doi: 10.5281/zenodo.24181449
 repository-code: "https://github.com/nbn07/farmsim"
