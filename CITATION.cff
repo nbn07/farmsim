@@ -4,7 +4,7 @@ title: "farmsim: Simulating Physical Verification Capacity for AI-Native Device 
 version: 1.1.0
 date-released: 2026-11-13
 license: MIT
-doi: 10.5281/zenodo.24181449
+doi: 10.5281/zenodo.24204059
 repository-code: "https://github.com/nbn07/farmsim"
 authors:
   - family-names: Nair

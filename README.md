@@ -1,6 +1,6 @@
 # farmsim
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24181449.svg)](https://doi.org/10.5281/zenodo.24181449)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24181448.svg)](https://doi.org/10.5281/zenodo.24181448)
 
 A small, reproducible simulation of physical verification capacity for AI-native device software. It accompanies the article "Cheap Code, Scarce Hardware: Verifying AI-Native Device Software" (submitted to *IEEE Computer*).
 
@@ -88,7 +88,7 @@ The suite has 215 tests. They cover:
 
 ## Citation and license
 
-Cite the archived release, [doi:10.5281/zenodo.24181449](https://doi.org/10.5281/zenodo.24181449); `CITATION.cff` has the details, and GitHub's "Cite this repository" button uses it. The code is released under the MIT License.
+Cite the archived release: version 1.1.0 is [doi:10.5281/zenodo.24204059](https://doi.org/10.5281/zenodo.24204059), and [doi:10.5281/zenodo.24181448](https://doi.org/10.5281/zenodo.24181448) always points to the latest version; `CITATION.cff` has the details, and GitHub's "Cite this repository" button uses it. The code is released under the MIT License.
 
 ## Limitations
 
